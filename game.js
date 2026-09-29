@@ -6,7 +6,8 @@
   // ────────────────────────────────────────────────────────────────────────────
 
   const canvas = document.querySelector("#game");
-  const ctx = canvas.getContext("2d", { alpha: false });
+  // `desynchronized` lets supported browsers present frames with less latency.
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
   const minimap = document.querySelector("#minimap");
   const mini = minimap.getContext("2d");
 
@@ -43,8 +44,11 @@
 
   const TAU = Math.PI * 2;
   const WORLD_RADIUS = 2260;
-  const FOOD_TARGET = 620;
-  const BOT_TARGET = 12;
+  // These counts keep the arena busy without making lower-powered laptops draw
+  // thousands of glowing objects every frame.
+  const FOOD_TARGET = 430;
+  const FOOD_MAX = 560;
+  const BOT_TARGET = 10;
   const SKINS = [
     { name: "Arctic", main: "#2cf7ff", light: "#b8ffff", dark: "#1689df", pattern: "#566aff" },
     { name: "Plasma", main: "#ff43d1", light: "#ffd2f3", dark: "#9b25e8", pattern: "#ff784c" },
@@ -63,6 +67,8 @@
   let W = innerWidth;
   let H = innerHeight;
   let dpr = 1;
+  let backgroundGradient = null;
+  let screenVignette = null;
   let state = "menu"; // menu | playing | paused | dead
   let lastTime = performance.now();
   let elapsed = 0;
@@ -75,6 +81,7 @@
   let bestScore = Number(localStorage.getItem("neon-serpents-best") || 0);
   let uiTimer = 0;
   let miniTimer = 0;
+  let collisionTimer = 0;
   let botSpawnQueue = [];
   let shake = 0;
   let flash = 0;
@@ -85,6 +92,12 @@
   let joystickPointer = null;
   let mobileBoosting = false;
   let soundOn = localStorage.getItem("neon-serpents-sound") !== "off";
+  let lowDetail = ((navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4);
+  let fpsAverage = 60;
+  let fpsFrames = 0;
+  let fpsTime = 0;
+  let slowTime = 0;
+  let fastTime = 0;
 
   const camera = { x: 0, y: 0, zoom: .92, targetZoom: .92 };
 
@@ -101,12 +114,21 @@
   function resize() {
     W = innerWidth;
     H = innerHeight;
-    dpr = Math.min(devicePixelRatio || 1, 1.8);
+    // A 2× or 3× display can otherwise require 4–9 times more pixels per frame.
+    dpr = Math.min(devicePixelRatio || 1, lowDetail ? 1 : 1.25);
     canvas.width = Math.floor(W * dpr);
     canvas.height = Math.floor(H * dpr);
     canvas.style.width = `${W}px`;
     canvas.style.height = `${H}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    backgroundGradient = ctx.createRadialGradient(W * .5, H * .42, 0, W * .5, H * .5, Math.max(W, H) * .8);
+    backgroundGradient.addColorStop(0, "#0c1640");
+    backgroundGradient.addColorStop(.52, "#070d27");
+    backgroundGradient.addColorStop(1, "#030611");
+    screenVignette = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .25, W / 2, H / 2, Math.max(W, H) * .72);
+    screenVignette.addColorStop(0, "rgba(0,0,0,0)");
+    screenVignette.addColorStop(1, "rgba(0,2,10,.43)");
   }
 
   // Small WebAudio synth: no audio files are needed.
@@ -166,23 +188,6 @@
       this.vx *= Math.pow(.05, dt);
       this.vy *= Math.pow(.05, dt);
     }
-    draw() {
-      const pulse = 1 + Math.sin(this.phase) * .14;
-      ctx.save();
-      ctx.globalCompositeOperation = "lighter";
-      ctx.fillStyle = this.color;
-      ctx.shadowColor = this.color;
-      ctx.shadowBlur = 11 + this.value * 2;
-      ctx.beginPath();
-      ctx.arc(this.x, this.y, this.radius * pulse, 0, TAU);
-      ctx.fill();
-      ctx.globalAlpha = .72;
-      ctx.fillStyle = "white";
-      ctx.beginPath();
-      ctx.arc(this.x - this.radius * .22, this.y - this.radius * .25, this.radius * .25, 0, TAU);
-      ctx.fill();
-      ctx.restore();
-    }
   }
 
   class Particle {
@@ -212,26 +217,24 @@
       const a = clamp(this.life / this.maxLife, 0, 1);
       ctx.globalAlpha = a;
       ctx.fillStyle = this.color;
-      ctx.shadowColor = this.color;
-      ctx.shadowBlur = 8;
       ctx.beginPath();
       ctx.arc(this.x, this.y, this.size * (.3 + a * .7), 0, TAU);
       ctx.fill();
       ctx.globalAlpha = 1;
-      ctx.shadowBlur = 0;
     }
   }
 
   class Snake {
-    constructor({ x, y, angle = rand(0, TAU), skin = choose(SKINS), name = "Bot", bot = true, length = 55 }) {
+    constructor({ x, y, angle = rand(0, TAU), skin = choose(SKINS), name = "Bot", bot = true, length = 55, giant = false }) {
       this.id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
       this.bot = bot;
+      this.isGiant = giant;
       this.name = name;
       this.skin = skin;
       this.angle = angle;
       this.targetAngle = angle;
-      this.radius = 12.4;
-      this.baseSpeed = bot ? rand(126, 143) : 142;
+      this.radius = giant ? 21 : 12.4;
+      this.baseSpeed = giant ? rand(108, 118) : (bot ? rand(126, 143) : 142);
       this.speed = this.baseSpeed;
       this.boost = 100;
       this.boosting = false;
@@ -244,16 +247,19 @@
       this.segments = [];
       this.aiTimer = rand(0, .16);
       this.aiWander = rand(-1, 1);
-      this.aiMood = Math.random();
+      this.aiMood = giant ? rand(.82, 1) : Math.random();
       this.shedTimer = 0;
       this.hitPulse = 0;
-      this.spawnShield = bot ? .9 : 1.3;
+      this.spawnShield = giant ? 2.8 : (bot ? .9 : 1.3);
       this.killer = "";
+      let segmentX = x;
+      let segmentY = y;
+      const spawnCurve = giant ? (Math.random() < .5 ? -.008 : .008) : 0;
       for (let i = 0; i < length; i++) {
-        this.segments.push({
-          x: x - Math.cos(angle) * i * this.radius * .66,
-          y: y - Math.sin(angle) * i * this.radius * .66
-        });
+        this.segments.push({ x: segmentX, y: segmentY });
+        const bodyAngle = angle + spawnCurve * i;
+        segmentX -= Math.cos(bodyAngle) * this.radius * .66;
+        segmentY -= Math.sin(bodyAngle) * this.radius * .66;
       }
     }
 
@@ -267,6 +273,10 @@
 
       if (this.bot) this.think(dt);
       else this.readPlayerInput();
+
+      // Snakes become thicker as they grow; titans have a much higher cap.
+      const radiusTarget = clamp(11.8 + Math.max(0, this.segments.length - 35) * .027, 11.8, this.isGiant ? 25 : 18.5);
+      this.radius = lerp(this.radius, radiusTarget, 1 - Math.exp(-1.8 * dt));
 
       const lengthPenalty = clamp((this.segments.length - 35) / 350, 0, .22);
       const wantsBoost = this.boosting && this.boost > 1 && this.segments.length > 30;
@@ -319,7 +329,7 @@
           }
           if (!this.bot && Math.random() < .25) audio.boost();
         }
-        if (Math.random() < .35) {
+        if (!lowDetail && Math.random() < .2) {
           const tail = this.segments[Math.min(this.segments.length - 1, 8)];
           particles.push(new Particle(tail.x, tail.y, this.skin.main, { speed: rand(8, 32), life: .25, size: rand(1, 3) }));
         }
@@ -343,7 +353,7 @@
     think(dt) {
       this.aiTimer -= dt;
       if (this.aiTimer > 0) return;
-      this.aiTimer = rand(.10, .19);
+      this.aiTimer = rand(.14, .24);
       const head = this.head;
       const radial = Math.hypot(head.x, head.y);
 
@@ -352,7 +362,7 @@
       let goalAngle = this.angle + this.aiWander * .22;
       let goalValue = Infinity;
       let nearestFood = null;
-      for (let i = 0; i < foods.length; i += 2) {
+      for (let i = 0; i < foods.length; i += 3) {
         const f = foods[i];
         if (!f.alive) continue;
         const d2 = distanceSq(head, f);
@@ -377,13 +387,13 @@
 
       // Score several possible steering directions. Long look-ahead makes bots
       // avoid traps earlier instead of turning only after they hit something.
-      const offsets = [-1.05, -.68, -.36, 0, .36, .68, 1.05];
+      const offsets = [-.95, -.43, 0, .43, .95];
       let bestAngle = this.angle;
       let bestSafety = -Infinity;
       for (const offset of offsets) {
         const candidate = this.angle + offset;
         let safety = Math.cos(normalizeAngle(candidate - goalAngle)) * 35 - Math.abs(offset) * 2.5;
-        for (const look of [72, 135, 220]) {
+        for (const look of [90, 205]) {
           const px = head.x + Math.cos(candidate) * look;
           const py = head.y + Math.sin(candidate) * look;
           const edgeRoom = WORLD_RADIUS - Math.hypot(px, py);
@@ -391,7 +401,7 @@
           for (const other of snakes) {
             if (!other.alive) continue;
             const start = other === this ? 18 : 1;
-            const step = other.segments.length > 130 ? 6 : 4;
+            const step = other.segments.length > 130 ? 9 : 6;
             for (let j = start; j < other.segments.length; j += step) {
               const s = other.segments[j];
               const dx = px - s.x;
@@ -420,16 +430,19 @@
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
 
-      // Soft aura underneath the complete body.
+      // Build one body path and reuse it for the outline, color and glow.
       ctx.beginPath();
       ctx.moveTo(segs[0].x, segs[0].y);
-      for (let i = 2; i < segs.length; i += 2) ctx.lineTo(segs[i].x, segs[i].y);
-      ctx.strokeStyle = this.skin.dark;
-      ctx.globalAlpha = this.alpha * .24;
-      ctx.shadowColor = this.skin.main;
-      ctx.shadowBlur = this.boosting ? 23 : 14;
-      ctx.lineWidth = r * 2.7;
-      ctx.stroke();
+      const bodyStep = (lowDetail || this.isGiant) ? 3 : 2;
+      for (let i = bodyStep; i < segs.length; i += bodyStep) ctx.lineTo(segs[i].x, segs[i].y);
+      if (!lowDetail || this === player || this.boosting) {
+        ctx.strokeStyle = this.skin.dark;
+        ctx.globalAlpha = this.alpha * .2;
+        ctx.shadowColor = this.skin.main;
+        ctx.shadowBlur = this.boosting ? 16 : 8;
+        ctx.lineWidth = r * 2.55;
+        ctx.stroke();
+      }
 
       // Dark outline and main body create one smooth, readable snake.
       ctx.globalAlpha = this.alpha;
@@ -442,11 +455,12 @@
       ctx.stroke();
 
       // Alternating plates provide texture and make motion easier to read.
-      for (let i = segs.length - 2; i >= 3; i -= 4) {
+      const plateStep = (lowDetail || this.isGiant) ? 10 : 6;
+      for (let i = segs.length - 2; i >= 3; i -= plateStep) {
         const s = segs[i];
         const tailScale = clamp(i / 12, .45, 1);
-        ctx.fillStyle = (Math.floor(i / 4) % 2) ? this.skin.pattern : this.skin.light;
-        ctx.globalAlpha = this.alpha * ((Math.floor(i / 4) % 2) ? .5 : .26);
+        ctx.fillStyle = (Math.floor(i / plateStep) % 2) ? this.skin.pattern : this.skin.light;
+        ctx.globalAlpha = this.alpha * ((Math.floor(i / plateStep) % 2) ? .46 : .24);
         ctx.beginPath();
         ctx.arc(s.x, s.y, r * .72 * tailScale, 0, TAU);
         ctx.fill();
@@ -454,15 +468,19 @@
 
       const head = segs[0];
       ctx.globalAlpha = this.alpha;
-      const grad = ctx.createRadialGradient(head.x - r * .35, head.y - r * .4, 1, head.x, head.y, r * 1.3);
-      grad.addColorStop(0, this.skin.light);
-      grad.addColorStop(.45, this.skin.main);
-      grad.addColorStop(1, this.skin.dark);
-      ctx.fillStyle = grad;
+      if (!lowDetail || this === player) {
+        const grad = ctx.createRadialGradient(head.x - r * .35, head.y - r * .4, 1, head.x, head.y, r * 1.3);
+        grad.addColorStop(0, this.skin.light);
+        grad.addColorStop(.45, this.skin.main);
+        grad.addColorStop(1, this.skin.dark);
+        ctx.fillStyle = grad;
+      } else {
+        ctx.fillStyle = this.skin.main;
+      }
       ctx.strokeStyle = "#081126";
       ctx.lineWidth = 2.2;
       ctx.shadowColor = this.skin.main;
-      ctx.shadowBlur = this.boosting ? 22 : 12;
+      ctx.shadowBlur = lowDetail ? 0 : (this.boosting ? 16 : 7);
       ctx.beginPath();
       ctx.ellipse(head.x, head.y, r * 1.12, r, this.angle, 0, TAU);
       ctx.fill();
@@ -503,7 +521,7 @@
         ctx.textAlign = "center";
         ctx.fillStyle = this.bot ? "#b4c0df" : "#ffffff";
         ctx.shadowColor = "#02040d";
-        ctx.shadowBlur = 5;
+        ctx.shadowBlur = lowDetail ? 0 : 3;
         ctx.fillText(this.name, head.x, head.y - r * 2.1);
       }
       ctx.restore();
@@ -530,11 +548,32 @@
   }
 
   function createBot(index = snakes.length) {
-    const p = safeSpawn(620);
-    const skin = SKINS[index % SKINS.length];
-    // Several established giants make the arena challenging immediately.
-    const length = index < 3 ? rand(145, 220) | 0 : rand(55, 145) | 0;
-    return new Snake({ x: p.x, y: p.y, skin, name: BOT_NAMES[index % BOT_NAMES.length], bot: true, length });
+    const giantCount = snakes.filter(s => s.bot && s.alive && s.isGiant).length;
+    const giant = giantCount < 2;
+    let p;
+    let angle;
+    let length;
+    let name;
+    let skin;
+
+    if (giant) {
+      const spawnAngle = rand(0, TAU);
+      const spawnRadius = rand(850, 1250);
+      p = { x: Math.cos(spawnAngle) * spawnRadius, y: Math.sin(spawnAngle) * spawnRadius };
+      angle = spawnAngle + (Math.random() < .5 ? Math.PI / 2 : -Math.PI / 2);
+      length = giantCount === 0 ? (rand(500, 590) | 0) : (rand(400, 490) | 0);
+      const titanNames = ["WORLD EATER", "VOID TITAN", "COLOSSUS"];
+      name = titanNames.find(n => !snakes.some(s => s.alive && s.name === n)) || choose(titanNames);
+      skin = giantCount === 0 ? SKINS[3] : SKINS[1];
+    } else {
+      p = safeSpawn(620);
+      angle = rand(0, TAU);
+      skin = SKINS[index % SKINS.length];
+      length = index < 4 ? (rand(180, 280) | 0) : (rand(60, 155) | 0);
+      name = BOT_NAMES[index % BOT_NAMES.length];
+    }
+
+    return new Snake({ x: p.x, y: p.y, angle, skin, name, bot: true, length, giant });
   }
 
   function seedWorld() {
@@ -604,7 +643,7 @@
     if (!snake.alive || snake.spawnShield > 0) return;
     snake.alive = false;
     snake.killer = killer?.name || "the arena";
-    const step = Math.max(2, Math.floor(snake.segments.length / 70));
+    const step = Math.max(3, Math.floor(snake.segments.length / 50));
     for (let i = 0; i < snake.segments.length; i += step) {
       const s = snake.segments[i];
       const food = new Food(s.x + rand(-7, 7), s.y + rand(-7, 7), Math.random() < .18 ? 3 : 1, snake.skin.main);
@@ -612,7 +651,7 @@
       food.vy = rand(-40, 40);
       foods.push(food);
       if (i % (step * 2) === 0) {
-        for (let k = 0; k < 2; k++) particles.push(new Particle(s.x, s.y, snake.skin.main, { speed: rand(40, 180), life: rand(.35, .9), size: rand(2, 6) }));
+        particles.push(new Particle(s.x, s.y, snake.skin.main, { speed: rand(40, 180), life: rand(.35, .75), size: rand(2, 5) }));
       }
     }
     if (snake === player) {
@@ -669,7 +708,8 @@
         snake.foodEaten++;
         snake.boost = Math.min(100, snake.boost + f.value * .9);
         snake.hitPulse = 1;
-        for (let i = 0; i < Math.min(5, f.value + 1); i++) particles.push(new Particle(f.x, f.y, f.color, { speed: rand(20, 90), life: rand(.18, .45), size: rand(1, 3.5) }));
+        const particleCount = lowDetail ? 1 : Math.min(3, f.value + 1);
+        for (let i = 0; i < particleCount; i++) particles.push(new Particle(f.x, f.y, f.color, { speed: rand(20, 90), life: rand(.18, .4), size: rand(1, 3.2) }));
         if (snake === player) {
           audio.eat(f.value);
           if (f.value >= 5) showFloatingText(f.x, f.y, `+${f.value * 4}`, f.color);
@@ -698,7 +738,7 @@
           break;
         }
         const start = other === snake ? 20 : 7;
-        for (let j = start; j < other.segments.length; j += 3) {
+        for (let j = start; j < other.segments.length; j += 4) {
           const seg = other.segments[j];
           const rr = snake.radius + other.radius * .68;
           if ((h.x - seg.x) ** 2 + (h.y - seg.y) ** 2 < rr * rr) {
@@ -729,17 +769,22 @@
     // Keep the menu background alive, but do not let that world affect a run.
     for (const snake of snakes) snake.update(dt);
     for (const snake of snakes) if (snake.alive) eatFood(snake);
-    if (state === "playing" || state === "menu") checkCollisions();
+    collisionTimer -= dt;
+    if (collisionTimer <= 0 && (state === "playing" || state === "menu")) {
+      collisionTimer = 1 / 30;
+      checkCollisions();
+    }
 
     for (const f of foods) if (f.alive) f.update(dt);
     foods = foods.filter(f => f.alive);
+    if (foods.length > FOOD_MAX) foods.splice(0, foods.length - FOOD_MAX);
     while (foods.length < FOOD_TARGET) {
       const p = randomWorldPoint(55);
       foods.push(new Food(p.x, p.y));
     }
 
     particles = particles.filter(p => p.update(dt));
-    if (particles.length > 900) particles.splice(0, particles.length - 900);
+    if (particles.length > 280) particles.splice(0, particles.length - 280);
     floatingText = floatingText.filter(t => { t.life -= dt; t.y -= 22 * dt; return t.life > 0; });
     snakes = snakes.filter(s => s.alive || s === player);
 
@@ -815,18 +860,14 @@
       mini.shadowColor = s.skin.main;
       mini.shadowBlur = s === player ? 7 : 3;
       mini.beginPath();
-      mini.arc(s.head.x * scale, s.head.y * scale, s === player ? 3.8 : 2.2, 0, TAU);
+      mini.arc(s.head.x * scale, s.head.y * scale, s === player ? 3.8 : (s.isGiant ? 3.3 : 2.2), 0, TAU);
       mini.fill();
     }
     mini.restore();
   }
 
   function drawBackground() {
-    const bg = ctx.createRadialGradient(W * .5, H * .42, 0, W * .5, H * .5, Math.max(W, H) * .8);
-    bg.addColorStop(0, "#0c1640");
-    bg.addColorStop(.52, "#070d27");
-    bg.addColorStop(1, "#030611");
-    ctx.fillStyle = bg;
+    ctx.fillStyle = backgroundGradient || "#070d27";
     ctx.fillRect(0, 0, W, H);
 
     // Screen-space stars give depth while the world grid shows movement.
@@ -836,7 +877,7 @@
     for (let x = starOffsetX - 87; x < W + 87; x += 87) {
       for (let y = starOffsetY - 83; y < H + 83; y += 83) {
         const seed = Math.abs(Math.sin(x * 13.17 + y * 8.31));
-        if (seed > .46) ctx.fillRect(x + seed * 25, y + seed * 13, seed > .86 ? 1.5 : 1, seed > .86 ? 1.5 : 1);
+        if (seed > (lowDetail ? .72 : .46)) ctx.fillRect(x + seed * 25, y + seed * 13, seed > .86 ? 1.5 : 1, seed > .86 ? 1.5 : 1);
       }
     }
   }
@@ -856,38 +897,83 @@
     for (let y = minY; y <= maxY; y += grid) { ctx.moveTo(minX, y); ctx.lineTo(maxX, y); }
     ctx.stroke();
 
-    // Arena edge glows in three layers and warns players before impact.
-    ctx.beginPath();
-    ctx.arc(0, 0, WORLD_RADIUS, 0, TAU);
-    ctx.strokeStyle = "rgba(63,113,255,.11)";
-    ctx.lineWidth = 45;
-    ctx.shadowColor = "#3069ff";
-    ctx.shadowBlur = 30;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    ctx.beginPath();
-    ctx.arc(0, 0, WORLD_RADIUS, 0, TAU);
-    ctx.setLineDash([22, 12]);
-    ctx.lineDashOffset = -elapsed * 28;
-    ctx.strokeStyle = "rgba(92,181,255,.7)";
-    ctx.lineWidth = 3.2;
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    const vignette = ctx.createRadialGradient(0, 0, WORLD_RADIUS - 260, 0, 0, WORLD_RADIUS + 80);
-    vignette.addColorStop(0, "rgba(3,5,14,0)");
-    vignette.addColorStop(.72, "rgba(15,22,75,.08)");
-    vignette.addColorStop(1, "rgba(2,3,10,.75)");
-    ctx.fillStyle = vignette;
-    ctx.beginPath();
-    ctx.arc(0, 0, WORLD_RADIUS + 100, 0, TAU);
-    ctx.fill();
+    // Only render the expensive arena aura when the edge can actually be seen.
+    const viewReach = Math.hypot(W, H) * .55 / camera.zoom;
+    if (Math.hypot(camera.x, camera.y) + viewReach > WORLD_RADIUS - 250) {
+      ctx.beginPath();
+      ctx.arc(0, 0, WORLD_RADIUS, 0, TAU);
+      ctx.strokeStyle = "rgba(63,113,255,.12)";
+      ctx.lineWidth = 35;
+      ctx.shadowColor = "#3069ff";
+      ctx.shadowBlur = lowDetail ? 0 : 16;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.beginPath();
+      ctx.arc(0, 0, WORLD_RADIUS, 0, TAU);
+      ctx.setLineDash([22, 12]);
+      ctx.lineDashOffset = -elapsed * 28;
+      ctx.strokeStyle = "rgba(92,181,255,.72)";
+      ctx.lineWidth = 3.2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   function isVisible(x, y, margin = 80) {
     const sx = (x - camera.x) * camera.zoom + W / 2;
     const sy = (y - camera.y) * camera.zoom + H / 2;
     return sx > -margin && sx < W + margin && sy > -margin && sy < H + margin;
+  }
+
+  function drawFoods() {
+    const visible = [];
+    for (let i = 0; i < foods.length; i++) {
+      const f = foods[i];
+      if (f.alive && isVisible(f.x, f.y, 60)) visible.push(f);
+    }
+    if (!visible.length) return;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    // A few batched color paths replace hundreds of individual shadow calls.
+    const visibleColors = new Set(visible.map(f => f.color));
+    for (const color of visibleColors) {
+      if (!lowDetail) {
+        ctx.beginPath();
+        for (const f of visible) {
+          if (f.color !== color) continue;
+          const pulse = 1 + Math.sin(f.phase) * .1;
+          const rr = f.radius * pulse * 2.05;
+          ctx.moveTo(f.x + rr, f.y);
+          ctx.arc(f.x, f.y, rr, 0, TAU);
+        }
+        ctx.globalAlpha = .13;
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+      ctx.beginPath();
+      for (const f of visible) {
+        if (f.color !== color) continue;
+        const rr = f.radius * (1 + Math.sin(f.phase) * .1);
+        ctx.moveTo(f.x + rr, f.y);
+        ctx.arc(f.x, f.y, rr, 0, TAU);
+      }
+      ctx.globalAlpha = .95;
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = .72;
+    ctx.fillStyle = "white";
+    ctx.beginPath();
+    for (const f of visible) {
+      if (lowDetail && f.value < 3) continue;
+      const rr = Math.max(.8, f.radius * .22);
+      ctx.moveTo(f.x - f.radius * .2 + rr, f.y - f.radius * .22);
+      ctx.arc(f.x - f.radius * .2, f.y - f.radius * .22, rr, 0, TAU);
+    }
+    ctx.fill();
+    ctx.restore();
   }
 
   function render() {
@@ -901,8 +987,8 @@
     ctx.translate(-camera.x, -camera.y);
     drawGrid();
 
-    for (const f of foods) if (f.alive && isVisible(f.x, f.y, 60)) f.draw();
-    for (const snake of snakes) if (snake.alive && snake.segments.some((s, i) => i % 16 === 0 && isVisible(s.x, s.y, 150))) snake.draw();
+    drawFoods();
+    for (const snake of snakes) if (snake.alive && snake.segments.some((s, i) => i % (snake.isGiant ? 16 : 28) === 0 && isVisible(s.x, s.y, 150))) snake.draw();
     for (const p of particles) if (isVisible(p.x, p.y)) p.draw();
 
     ctx.textAlign = "center";
@@ -911,17 +997,14 @@
       ctx.font = "900 13px Nunito, sans-serif";
       ctx.fillStyle = t.color;
       ctx.shadowColor = t.color;
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = lowDetail ? 0 : 6;
       ctx.fillText(t.text, t.x, t.y);
     }
     ctx.globalAlpha = 1;
     ctx.restore();
 
     // A subtle screen vignette keeps focus on the action.
-    const vignette = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .25, W / 2, H / 2, Math.max(W, H) * .72);
-    vignette.addColorStop(0, "rgba(0,0,0,0)");
-    vignette.addColorStop(1, "rgba(0,2,10,.43)");
-    ctx.fillStyle = vignette;
+    ctx.fillStyle = screenVignette || "rgba(0,2,10,.12)";
     ctx.fillRect(0, 0, W, H);
     if (flash > 0) {
       ctx.fillStyle = `rgba(120,210,255,${flash * .17})`;
@@ -930,11 +1013,44 @@
   }
 
   function frame(now) {
-    const dt = Math.min(.033, (now - lastTime) / 1000 || .016);
+    const rawDt = (now - lastTime) / 1000 || .016;
+    const dt = Math.min(.033, rawDt);
     lastTime = now;
+    trackPerformance(rawDt);
     if (state !== "paused") update(dt);
     render();
     requestAnimationFrame(frame);
+  }
+
+  function trackPerformance(rawDt) {
+    if (rawDt > .2) return;
+    fpsFrames++;
+    fpsTime += rawDt;
+    if (fpsTime < .75) return;
+    const measured = fpsFrames / fpsTime;
+    fpsAverage = lerp(fpsAverage, measured, .45);
+    if (state === "playing" && fpsAverage < 51) {
+      slowTime += fpsTime;
+      fastTime = 0;
+    } else if (fpsAverage > 57) {
+      fastTime += fpsTime;
+      slowTime = Math.max(0, slowTime - fpsTime);
+    } else {
+      slowTime = Math.max(0, slowTime - fpsTime * .35);
+      fastTime = 0;
+    }
+    fpsFrames = 0;
+    fpsTime = 0;
+    if (!lowDetail && slowTime > 1.4) {
+      lowDetail = true;
+      slowTime = 0;
+      resize();
+      showStatus("60 FPS PERFORMANCE MODE", 1.2);
+    } else if (lowDetail && fastTime > 8) {
+      lowDetail = false;
+      fastTime = 0;
+      resize();
+    }
   }
 
   function cycleSkin() {
