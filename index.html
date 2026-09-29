@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#050816" />
+  <meta name="description" content="Neon Serpents — a fast, polished snake arena game with intelligent bots." />
+  <title>Neon Serpents</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700;800;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="game" aria-label="Neon Serpents game arena"></canvas>
+
+  <div id="hud" class="hud hidden" aria-hidden="true">
+    <section class="stat-card score-card">
+      <span class="stat-label">SCORE</span>
+      <strong id="score">0</strong>
+      <div class="best-row"><span>BEST</span><b id="best">0</b></div>
+    </section>
+
+    <section class="leaderboard glass">
+      <div class="panel-title"><span class="crown">♛</span> TOP SERPENTS</div>
+      <ol id="leader-list"></ol>
+    </section>
+
+    <section class="minimap-wrap glass">
+      <div class="panel-title">ARENA</div>
+      <canvas id="minimap" width="150" height="150"></canvas>
+    </section>
+
+    <div class="top-actions">
+      <button id="pause-btn" class="icon-btn" aria-label="Pause game" title="Pause (P)">Ⅱ</button>
+      <button id="sound-btn" class="icon-btn" aria-label="Toggle sound" title="Sound">♪</button>
+    </div>
+
+    <div id="boost-meter" class="boost-meter">
+      <div class="boost-label"><span>BOOST</span><b id="boost-percent">100%</b></div>
+      <div class="boost-track"><div id="boost-fill"></div></div>
+    </div>
+
+    <div id="status-message" class="status-message"></div>
+    <div id="mobile-joystick" class="joystick" aria-hidden="true"><div class="joystick-knob"></div></div>
+    <button id="mobile-boost" class="mobile-boost" aria-label="Boost">BOOST</button>
+  </div>
+
+  <main id="menu" class="overlay visible">
+    <div class="menu-orb orb-one"></div>
+    <div class="menu-orb orb-two"></div>
+    <section class="menu-card">
+      <div class="eyebrow"><span></span> ENTER THE NEON ARENA <span></span></div>
+      <h1><span>NEON</span><br />SERPENTS</h1>
+      <p class="tagline">Eat. Grow. Outsmart the arena.</p>
+
+      <form id="start-form" autocomplete="off">
+        <label for="nickname">YOUR SERPENT NAME</label>
+        <div class="name-row">
+          <input id="nickname" maxlength="14" value="Neon Rider" aria-label="Player name" />
+          <button id="skin-btn" type="button" aria-label="Change snake color">
+            <span id="skin-preview"></span>
+            <small>SKIN</small>
+          </button>
+        </div>
+        <button class="play-btn" type="submit"><span>PLAY NOW</span><i>▶</i></button>
+      </form>
+
+      <div class="how-to">
+        <div><span class="control-icon mouse-icon"></span><p><b>MOVE</b><small>Mouse or touch</small></p></div>
+        <div><span class="key-icon">SPACE</span><p><b>BOOST</b><small>Hold to sprint</small></p></div>
+        <div><span class="key-icon compact">P</span><p><b>PAUSE</b><small>Take a break</small></p></div>
+      </div>
+
+      <p class="warning"><span>◆</span> Don't hit another serpent or the arena wall</p>
+      <div class="menu-footer"><span>SMART BOT ARENA</span><i></i><span>OFFLINE GAME</span></div>
+    </section>
+  </main>
+
+  <section id="pause-screen" class="overlay dialog-overlay" aria-hidden="true">
+    <div class="dialog glass">
+      <span class="dialog-symbol">Ⅱ</span>
+      <h2>GAME PAUSED</h2>
+      <p>The arena is waiting.</p>
+      <button id="resume-btn" class="play-btn"><span>RESUME</span><i>▶</i></button>
+      <button id="quit-btn" class="text-btn">QUIT TO MENU</button>
+    </div>
+  </section>
+
+  <section id="gameover" class="overlay dialog-overlay" aria-hidden="true">
+    <div class="dialog gameover-card glass">
+      <span class="dialog-symbol danger">☠</span>
+      <p class="overline">SERPENT DOWN</p>
+      <h2 id="death-title">SO CLOSE!</h2>
+      <div class="result-score"><small>FINAL SCORE</small><strong id="final-score">0</strong></div>
+      <div class="results-grid">
+        <div><span id="final-length">0</span><small>MAX LENGTH</small></div>
+        <div><span id="final-food">0</span><small>ORBS EATEN</small></div>
+        <div><span id="final-time">0:00</span><small>SURVIVED</small></div>
+      </div>
+      <button id="again-btn" class="play-btn"><span>PLAY AGAIN</span><i>↻</i></button>
+      <button id="menu-btn" class="text-btn">BACK TO MENU</button>
+    </div>
+  </section>
+
+  <noscript>This game needs JavaScript enabled to run.</noscript>
+  <script src="game.js"></script>
+</body>
+</html>
